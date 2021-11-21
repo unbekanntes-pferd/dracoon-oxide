@@ -2,13 +2,14 @@
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Client, Response, Url};
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime};
+use chrono::offset::Utc;
 
 /// constants for grant_type
 const GRANT_TYPE_PASSWORD: &str = "password";
 const GRANT_TYPE_AUTH_CODE: &str = "authorization_code";
 const GRANT_TYPE_REFRESH_TOKEN: &str = "refresh_token";
 const TOKEN_TYPE_HINT_ACCESS: &str = "access_token";
-const TOKEN_TYPE_HINT_REFRESH: &str = "refresh_token";
 
 /// constants for API urls
 const DRACOON_TOKEN_URL: &str = "oauth/token";
@@ -68,8 +69,8 @@ pub struct OAuth2TokenResponse {
     access_token: String,
     refresh_token: String,
     token_type: Option<String>,
-    expires_in: i32,
-    expires_in_inactive: i32,
+    expires_in: i64,
+    expires_in_inactive: i64,
     scope: String,
 }
 
@@ -103,16 +104,17 @@ impl From<reqwest::Error> for DRACOONClientError {
 /// struct for storing DRACOON connection details
 #[derive(Debug)]
 pub struct DRACOONConnection {
+    connected_at: DateTime<Utc>,
     access_token: String,
-    access_token_validity: i32,
+    access_token_validity: i64,
     refresh_token: String,
-    refresh_token_validity: i32,
+    refresh_token_validity: i64,
 }
 
 /// supported OAuth2 flows by client
 pub enum OAuth2ConnectionType {
-    PasswordFlow,
-    AuthCode,
+    PasswordFlow(String, String),
+    AuthCode(String),
     RefreshToken,
 }
 
@@ -146,6 +148,7 @@ impl DRACOONClient {
     /// convert OAuth2TokenResponse to a connection item
     fn create_connection(&mut self, token_response: &OAuth2TokenResponse) -> &Self {
         let connection = DRACOONConnection {
+            connected_at: Utc::now(),
             access_token: token_response.access_token.to_owned(),
             refresh_token: token_response.refresh_token.to_owned(),
             access_token_validity: token_response.expires_in_inactive,
@@ -166,6 +169,18 @@ impl DRACOONClient {
             Some(conn) => Ok(&conn),
             None => Err(DRACOONClientError::BrokenConnection),
         }
+    }
+
+    pub fn check_access_token_validity(&self) -> Result<bool, DRACOONClientError> {
+        let conn = match &self.connection {
+            Some(conn) => conn,
+            None => return Err(DRACOONClientError::BrokenConnection),
+        };
+
+        let now = Utc::now();
+
+        Ok((now - conn.connected_at).num_seconds() < conn.access_token_validity)
+
     }
 
     /// authenticated ping
@@ -196,11 +211,6 @@ impl DRACOONClient {
             Err(e) => return Err(DRACOONClientError::BrokenConnection),
         };
 
-/*         let refresh = match revoke_refresh {
-            Some(revoke_refresh) => revoke_refresh,
-            None => false,
-        }; */
-
         let revoke_url = format!("{}{}", &self.base_url, DRACOON_TOKEN_REVOKE_URL);
 
         let revoke_access = OAuth2TokenRevoke { token: conn.access_token.clone().to_owned(), token_type_hint: TOKEN_TYPE_HINT_ACCESS.to_string(), client_id: self.client_id.clone(), client_secret: self.client_secret.clone()};
@@ -216,22 +226,6 @@ impl DRACOONClient {
         match res.status() {
             reqwest::StatusCode::OK => {
 
-                   // TO DO: implement logic to revoke refresh token
-
-/*                 if refresh {
-
-                    let revoke_refresh = OAuth2TokenRevoke { token: conn.refresh_token.clone().to_owned(), token_type_hint: TOKEN_TYPE_HINT_REFRESH.to_string(), client_id: self.client_id, client_secret: self.client_secret};
-                
-                    let res = &self.http
-                    .post(revoke_url)
-                    .form(&revoke_refresh)
-                    .send()
-                    .await?;
-        
-                } */
-
-                // self.connection = None;
-
                 Ok(self)
 
             },
@@ -246,13 +240,10 @@ impl DRACOONClient {
     pub async fn connect(
         &mut self,
         connection_type: OAuth2ConnectionType,
-        user_name: Option<String>,
-        password: Option<String>,
-        auth_code: Option<String>,
     ) -> Result<&DRACOONConnection, DRACOONClientError> {
         let token_response = match connection_type {
-            OAuth2ConnectionType::AuthCode => self.connect_auth_code(auth_code).await,
-            OAuth2ConnectionType::PasswordFlow => {
+            OAuth2ConnectionType::AuthCode(auth_code) => self.connect_auth_code(auth_code).await,
+            OAuth2ConnectionType::PasswordFlow(user_name, password) => {
                 self.connect_password_flow(user_name, password).await
             }
             OAuth2ConnectionType::RefreshToken => self.connect_refresh_token().await,
@@ -285,10 +276,10 @@ impl DRACOONClient {
 
     async fn connect_password_flow(
         &self,
-        user_name: Option<String>,
-        password: Option<String>,
+        user_name: String,
+        password: String,
     ) -> Result<OAuth2TokenResponse, DRACOONClientError> {
-        if let (Some(user_name), Some(password)) = (user_name, password) {
+ 
             let client_b64 = self.client_credentials();
 
             let token_url = self.get_token_url();
@@ -313,9 +304,7 @@ impl DRACOONClient {
                 Ok(res) => Ok(res),
                 Err(err) => Err(err),
             }
-        } else {
-            Err(DRACOONClientError::MissingArguments)
-        }
+      
     }
 
     async fn connect_refresh_token(&self) -> Result<OAuth2TokenResponse, DRACOONClientError> {
@@ -351,9 +340,9 @@ impl DRACOONClient {
 
     pub async fn connect_auth_code(
         &self,
-        auth_code: Option<String>,
+        auth_code: String,
     ) -> Result<OAuth2TokenResponse, DRACOONClientError> {
-        if let Some(auth_code) = auth_code {
+        
             let token_url = self.get_token_url();
 
             let auth = OAuth2AuthCodeFlow {
@@ -369,8 +358,6 @@ impl DRACOONClient {
                 Ok(res) => Ok(res),
                 Err(err) => Err(err),
             }
-        } else {
-            Err(DRACOONClientError::MissingArguments)
-        }
+        
     }
 }
